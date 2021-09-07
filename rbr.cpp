@@ -15,7 +15,7 @@
 #include	<ctime>
 #include	<omp.h>
 using	namespace	std;
-const	float	missing=1e15;
+
 typedef	float	v4sf	__attribute__	((__vector_size__	(16)));
 union	XMM{
     uint32_t	i[4];
@@ -31,7 +31,7 @@ class	RBR{
 private:
 	vector<float>	weight;
 	vector<uint32_t>	fid,	bit,	sum1;
-	bool	binary,	pretrain;
+	bool	binary;
 	float	*dbeta;
 	
 	void	set_one(vector<uint32_t>	&V,	uint64_t	I){	V[I>>5]|=1U<<(I&31);	}
@@ -40,7 +40,7 @@ private:
 		return	reinterpret_cast<RBR*>(instance)->function(x, g);
 	}
     static	int	progress(void	*instance,	const	lbfgsfloatval_t	*x,	const lbfgsfloatval_t *g,	const	lbfgsfloatval_t	fx,	const	lbfgsfloatval_t	xnorm,	const lbfgsfloatval_t gnorm,	const	lbfgsfloatval_t	step,	int n,	int	k,	int	ls){
-		cerr<<k<<'\t'<<fx<<"       \r";
+		cerr<<k<<'\t'<<(2-reinterpret_cast<RBR*>(instance)->binary)*fx/reinterpret_cast<RBR*>(instance)->trainn<<"       \r";
 		return	0;
 	}
 	void	predict(const	float	*X);
@@ -64,49 +64,39 @@ bool	RBR::load_weight(const	char	*F){
 	fi.close();
 	return	true;
 }
-	
-bool	RBR::load_matrix(const	char	*F,	vector<float>	&M,	size_t	&R,	size_t	&C){
+
+bool	RBR::load_matrix(const	char	*F,	vector<float>	&M,	uint64_t	&R,	uint64_t	&C) {
 	ifstream	fi(F);
-	if(!fi){	cerr<<"fail to open "<<F<<'\n';	return	false;	}	//	A
-	R=0;	M.clear();	string	buf;	float	x;
-	while(!fi.eof()){
-		getline(fi,	buf);	if(!buf.size())	continue;
-		for(size_t	i=0;	i<buf.size();	i++)	if(buf[i]==','||buf[i]==';')	buf[i]=' ';
-		istringstream	si(buf);
-		while(!si.eof()){	x=-FLT_MAX;	si>>x;	if(x>-FLT_MAX)	M.push_back(x);	}
+	if(!fi) {	cerr<<"fail to open "<<F<<'\n';	return	false;	}
+	string	buf;	R=C=0;
+	while(getline(fi,buf))	if(buf.size()) {
+		char	*p=(char*)buf.data(),	*q;
+		for(;;) {	q=p;	float	x=strtod(p,	&p);	if(p!=q)	M.push_back(x);	else	break;	}
 		R++;
 	}
 	fi.close();
-	if(M.size()%R){	cerr<<"unequal column\t"<<F<<'\n';	return	false;	}	//	N
+	if(M.size()%R) {	cerr<<"unequal column\t"<<F<<'\n';	return	false;	}
 	C=M.size()/R;
-	cout<<F<<'\t'<<R<<'*'<<C<<'\n';
+	cout<<F<<'\t'<<R<<'*'<<C<<'\n';	
 	return	true;
 }
 
 void	RBR::x2bit(vector<float>	&TrX,	vector<float>	&TeX){
 	//	data preprocessing
-	size_t	total=trainn+testn,	asize=total%4?(total/4+1)*4:total,	notna=0;
+	size_t	total=trainn+testn,	asize=total%16?(total/16+1)*16:total;
 	float	*data;
 	if(posix_memalign((void**)&data,	16,	feature*asize*4)){	cerr<<"not enough memory\n";	return;	}	//	G
 	#pragma omp parallel for
 	for(size_t	i=0;	i<feature;	i++){
-		float	*p=data+i*asize;	size_t	n=0;	double	sx=0,	sxx=0;
-		for(size_t	j=0;	j<trainn;	j++){	p[j]=TrX[j*feature+i];	if(fabsf(p[j])<missing){	n++;	sx+=p[j];	sxx+=p[j]*p[j];	}	}
+		float	*p=data+i*asize;	size_t	n=total;	double	sx=0,	sxx=0;
+		for(size_t	j=0;	j<trainn;j++){	p[j]=TrX[j*feature+i];	sx+=(double)p[j];	sxx+=(double)p[j]*(double)p[j];	}
 		p=data+i*asize+trainn;
-		for(size_t	j=0;	j<testn;	j++){	p[j]=TeX[j*feature+i];	if(fabsf(p[j])<missing){	n++;	sx+=p[j];	sxx+=p[j]*p[j];	}	}
+		for(size_t	j=0;	j<testn;	j++){	p[j]=TeX[j*feature+i];	sx+=(double)p[j];	sxx+=(double)p[j]*(double)p[j];	}
 		p=data+i*asize;
-		if(!n)	memset(p,	0,	total*4);
-		else{
-			#pragma omp atomic
-			notna+=n;
-			sx/=n;	sxx=sxx-sx*sx*n;	sxx=sxx>0?sqrt((n-1)/sxx):0;
-			for(size_t	j=0;	j<total;	j++)	p[j]=fabsf(p[j])<missing?sxx*(p[j]-sx):0;
-		}
+		sx/=n;	sxx=sxx-sx*sx*n;	sxx=sxx>0?sqrt((n-1)/sxx):0;
+		for(size_t	j=0;	j<total;	j++)	p[j]=sxx*(p[j]-sx);
 	}
 	vector<float>().swap(TrX);	vector<float>().swap(TeX);
-	if(notna!=total*feature)	cout<<total*feature-notna<<"\tmissing values have been replaced by mean\n";
-	else	cout<<"data has no missing values\n";
-			
 	//	random bits generation
 	if(twist>feature)	twist=feature;
 	bits=bits%32?(bits/32+1)*32:bits;	size_t	block=bits/32;
@@ -114,7 +104,7 @@ void	RBR::x2bit(vector<float>	&TrX,	vector<float>	&TeX){
 	if(weight.size()!=feature){	weight.assign(feature,	1);	cout<<"using uniform variable weights\n";	}
 	else	cout<<"using custom variable weights\n";
 	cout<<"bits\t"<<bits<<'\n';
-	float	sumw=0;	for(size_t	i=0;	i<feature;	i++)	sumw+=weight[i];
+	float	sumw=0;	for(size_t	i=0;	i<feature;	i++){	sumw+=weight[i];	weight[i]=sumw;	}
 	vector<XSA>	rng(thread);	size_t	t0=time(NULL);	for(size_t	i=0;	i<thread;	i++)	rng[i].set(t0+i);
 	float	*temp;	if(posix_memalign((void**)&temp,	16,	thread*asize*4)){	cerr<<"not enough memory\n";	return;	}	//	Y
 	for(size_t	i=0;	i<total;	i++)	set_one(bit,	i*bits);
@@ -124,20 +114,17 @@ void	RBR::x2bit(vector<float>	&TrX,	vector<float>	&TeX){
 		float	*p=temp+omp_get_thread_num()*asize;
 		XSA	&r=rng[omp_get_thread_num()];
 		uint32_t	*id=&fid[f*twist];	
-		for(size_t	i=0;	i<twist;	i++){
-			bool	flag=false;
-			while(!flag){
-				float	ran=r.uniform_single()*sumw,	sum=0;	id[i]=feature-1;
-				for(size_t	j=0;	j<feature;	j++){	sum+=weight[j];	if(sum>ran){	id[i]=j;	break;	}	}
-				flag=true;	for(size_t	j=0;	j<i;	j++)	if(id[i]==id[j])	flag=false;
-			}
-		}
+		for(size_t	i=0;	i<twist;	i++)	do	id[i]=lower_bound(weight.begin(),	weight.end(),	r.uniform_single()*sumw)-weight.begin();	while(find(id,	id+i,	id[i])!=id+i);
 		sort(id,	id+twist);
 		memset(p,	0,	total*4);
 		for(size_t	i=0;	i<twist;	i++){
-			float	*q=data+id[i]*asize,	w=r.normal();	v4sf	z={w,w,w,w};
-			for(size_t	j=0;	j<asize;	j+=4)
-				*(v4sf*)(p+j)=__builtin_ia32_addps(*(v4sf*)(p+j),	__builtin_ia32_mulps(z,	*(v4sf*)(q+j)));	
+			float	*q=data+id[i]*asize,	w=r.fast_normal_single();	v4sf	z={w,w,w,w};
+			for(size_t	j=0;	j<asize;	j+=16){
+				*(v4sf*)(p+j+0)=__builtin_ia32_addps(*(v4sf*)(p+j+0),	__builtin_ia32_mulps(z,	*(v4sf*)(q+j+0)));
+				*(v4sf*)(p+j+4)=__builtin_ia32_addps(*(v4sf*)(p+j+4),	__builtin_ia32_mulps(z,	*(v4sf*)(q+j+4)));
+				*(v4sf*)(p+j+8)=__builtin_ia32_addps(*(v4sf*)(p+j+8),	__builtin_ia32_mulps(z,	*(v4sf*)(q+j+8)));
+				*(v4sf*)(p+j+12)=__builtin_ia32_addps(*(v4sf*)(p+j+12),	__builtin_ia32_mulps(z,	*(v4sf*)(q+j+12)));
+			}	
 		}
 		float	cut=p[r.get()%total];
 		size_t	ones=0;
@@ -152,7 +139,7 @@ void	RBR::x2bit(vector<float>	&TrX,	vector<float>	&TeX){
 lbfgsfloatval_t	RBR::function(const	lbfgsfloatval_t	*x,	lbfgsfloatval_t	*g){
 	double	loss=0;	memset(dbeta,	0,	thread*bits*4);
 	#pragma omp parallel for
-	for(size_t	i=0;	i<trainn;	i++)	if(!pretrain||!(i&15)){
+	for(size_t	i=0;	i<trainn;	i++){
 		size_t	k=omp_get_thread_num();
 		uint32_t	*p=&bit[i*(bits>>5)];
 		float	*q=dbeta+k*bits;
@@ -225,24 +212,20 @@ void	RBR::estimate(const	char	*F){
 	double	sx=0,	sxx=0;
 	for(size_t	i=0;	i<trainn;	i++){
 		if(trainy[i]!=0&&trainy[i]!=1)	binary=false;
-		sx+=trainy[i];	sxx+=trainy[i]*trainy[i];
+		sx+=trainy[i];	sxx+=(double)trainy[i]*trainy[i];
 	}
-	sx/=trainn;	sxx=sxx/trainn-sx*sx;
-	if(sxx<=0)	sxx=1;
-	penalty=binary?penalty*(bits-1):penalty*(bits-1)/sxx;
+	sx/=trainn;	sxx=sxx/trainn-sx*sx;	sxx=sxx>0?sqrt(sxx):1;
+	if(!binary)	for(size_t	i=0;	i<trainn;	i++)	trainy[i]=(trainy[i]-sx)/sxx;
+	penalty=binary?penalty*(bits-1):penalty*(bits-1);
+	
 	
 	if(posix_memalign((void**)&dbeta,	16,	thread*bits*4)){	cerr<<"not enough memory\n";	return;	}	//	I
 	lbfgsfloatval_t	score,	*x=lbfgs_malloc(bits);
 	memset(x,	0,	bits*4);
 	lbfgs_parameter_t	para;	lbfgs_parameter_init(&para);	
-	para.m=correction;	para.max_iterations=0;	para.epsilon=0;	para.past=10;	para.delta=1e-5;
+	para.m=correction;	para.max_iterations=0;	para.epsilon=0;	para.past=10;	para.delta=1e-4;
 	
 	cout<<"step\tloss\n";
-	pretrain=true;
-	lbfgs(bits,	x,	&score,	evaluate,	progress,	this,	&para);
-	cout<<endl;
-
-	pretrain=false;	
 	lbfgs(bits,	x,	&score,	evaluate,	progress,	this,	&para);
 	cout<<endl;	
 
@@ -258,7 +241,7 @@ void	RBR::estimate(const	char	*F){
 	lbfgs_free(x);
 	
 	ofstream	fo(F);
-	for(size_t	i=0;	i<testn;	i++)	fo<<testy[i]<<'\n';
+	for(size_t	i=0;	i<testn;	i++)	fo<<(binary?testy[i]:testy[i]*sxx+sx)<<'\n';
 	fo.close();
 	
 	fo.open("variable.importance");
@@ -271,7 +254,7 @@ void	RBR::document(void){
 	cout<<"\t-b:	number of random bits.		default=100000\n";
 	cout<<"\t-r:	Scaled L2 regularization.	default=1\n";
 	cout<<"\t-t:	number of features twisted.	default=2\n";
-	cout<<"\t-c:	L-BFGS corrections.		default=256\n";
+	cout<<"\t-c:	L-BFGS corrections.		default=128\n";
 	cout<<"\t-T:	number of threads.		default=0 (all)\n";
 	cout<<"\t-w:	variable weights file.\n";
 	cout<<"\ttrainX,trainY,testX:	input files in csv/tsv format without header.\n";
@@ -285,11 +268,11 @@ int	main(int	ac,	char	**av){
 	cout<<"* Random Bits Regression          *\n";
 	cout<<"* author: Yi Wang                 *\n";
 	cout<<"* email:  godspeed_china@yeah.net *\n";
-	cout<<"* date:   23/Jan/2015             *\n";
+	cout<<"* date:   27/Jun/2014             *\n";
 	cout<<"***********************************\n";
 	
 	RBR	rbr;
-	rbr.bits=100000;	rbr.penalty=1;	rbr.twist=2;	rbr.correction=256;	rbr.thread=0;
+	rbr.bits=100000;	rbr.penalty=1;	rbr.twist=2;	rbr.correction=128;	rbr.thread=0;
 	int	opt;
 	while((opt=getopt(ac,	av,	"b:r:t:c:T:w:"))>=0){
 		switch(opt){
