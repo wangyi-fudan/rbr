@@ -118,7 +118,7 @@ void	RBR::x2bit(vector<float>	&TrX,	vector<float>	&TeX){
 		sort(id,	id+twist);
 		memset(p,	0,	total*4);
 		for(size_t	i=0;	i<twist;	i++){
-			float	*q=data+id[i]*asize,	w=r.fast_normal_single();	v4sf	z={w,w,w,w};
+			float	*q=data+id[i]*asize,	w=r.fast_normal();	v4sf	z={w,w,w,w};
 			for(size_t	j=0;	j<asize;	j+=16){
 				*(v4sf*)(p+j+0)=__builtin_ia32_addps(*(v4sf*)(p+j+0),	__builtin_ia32_mulps(z,	*(v4sf*)(q+j+0)));
 				*(v4sf*)(p+j+4)=__builtin_ia32_addps(*(v4sf*)(p+j+4),	__builtin_ia32_mulps(z,	*(v4sf*)(q+j+4)));
